@@ -1,0 +1,4 @@
+/.venv
+__pycache__/
+/models/VR_Models/*.pth
+/models/MDX_Net_Models/*.onnx
