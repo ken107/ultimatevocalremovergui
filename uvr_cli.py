@@ -1,6 +1,7 @@
 #!/usr/bin/env python3
 
 import argparse
+import json
 import sys
 from pathlib import Path
 
@@ -184,7 +185,7 @@ def parse_args():
     parser = argparse.ArgumentParser(
         description="Headless CLI for UVR model inference."
     )
-    parser.add_argument("inputs", nargs="+", type=Path, help="Input audio file(s).")
+    parser.add_argument("inputs", nargs="*", type=Path, help="Input audio file(s).")
     parser.add_argument(
         "-o",
         "--output-dir",
@@ -226,6 +227,11 @@ def parse_args():
         action="store_true",
         help="Save both stems instead of instrumental only.",
     )
+    parser.add_argument(
+        "--stdin",
+        action="store_true",
+        help="Read input file paths from stdin, one path per line.",
+    )
     if len(sys.argv) == 1:
         parser.print_help()
         raise SystemExit(0)
@@ -247,6 +253,9 @@ def configure_stem_saving(model_data, save_both):
 
 
 def validate_args(args):
+    if not args.stdin and not args.inputs:
+        raise SystemExit("Provide at least one input path or use --stdin.")
+
     missing = [str(path) for path in args.inputs if not path.is_file()]
     if missing:
         raise SystemExit(f"Missing input file(s): {', '.join(missing)}")
@@ -280,6 +289,54 @@ def expected_model_location(args):
     return Path(".")
 
 
+def result_output_paths(model_data, input_path, output_dir):
+    audio_file_base = Path(input_path).stem
+    output_paths = []
+
+    if not model_data.is_secondary_stem_only:
+        output_paths.append(str(output_dir / f"{audio_file_base}_({model_data.primary_stem}).wav"))
+
+    if not model_data.is_primary_stem_only:
+        output_paths.append(str(output_dir / f"{audio_file_base}_({model_data.secondary_stem}).wav"))
+
+    return output_paths
+
+
+def emit_result(input_path, ok, outputs=None, error=None):
+    payload = {
+        "input": str(input_path),
+        "ok": ok,
+    }
+
+    if outputs is not None:
+        payload["outputs"] = outputs
+
+    if error is not None:
+        payload["error"] = error
+
+    print(json.dumps(payload), flush=True)
+
+
+def iter_stdin_inputs():
+    for raw_line in sys.stdin:
+        yield raw_line.rstrip("\r\n")
+
+
+def process_input(input_path, args, runner, model_data):
+    path = Path(input_path)
+    if not path.is_file():
+        raise FileNotFoundError(f"Missing input file: {path}")
+
+    process_data = runner.build_process_data(str(path), str(args.output_dir))
+    process_data["model_data"] = model_data
+    process_data["list_all_models"] = [model_data.model_basename]
+    print(f"[input] {path}", file=sys.stderr)
+    separator = build_separator(model_data, process_data)
+    separator.seperate()
+
+    return result_output_paths(model_data, path, args.output_dir)
+
+
 def main():
     args = parse_args()
     validate_args(args)
@@ -297,15 +354,24 @@ def main():
         )
 
     configure_stem_saving(model_data, args.save_both)
+    input_iterable = iter_stdin_inputs() if args.stdin else (str(path) for path in args.inputs)
 
-    for input_path in args.inputs:
-        process_data = runner.build_process_data(str(input_path), str(args.output_dir))
-        process_data["model_data"] = model_data
-        process_data["list_all_models"] = [model_data.model_basename]
-        print(f"[input] {input_path}", file=sys.stderr)
-        separator = build_separator(model_data, process_data)
-        separator.seperate()
-        clear_gpu_cache()
+    for raw_input in input_iterable:
+        if args.stdin and raw_input == "":
+            error = "Empty input line."
+            print(f"[error] {error}", file=sys.stderr)
+            emit_result(raw_input, ok=False, error=error)
+            continue
+
+        try:
+            outputs = process_input(raw_input, args, runner, model_data)
+        except Exception as exc:
+            print(f"[error] {exc}", file=sys.stderr)
+            emit_result(raw_input, ok=False, error=str(exc))
+        else:
+            emit_result(raw_input, ok=True, outputs=outputs)
+        finally:
+            clear_gpu_cache()
 
 
 if __name__ == "__main__":
