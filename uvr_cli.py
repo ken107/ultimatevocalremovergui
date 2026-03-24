@@ -143,6 +143,7 @@ class CliRunner:
             MDX_ARCH_TYPE: {},
             DEMUCS_ARCH_TYPE: {},
         }
+        self.separator_cache = {}
 
     def set_progress_bar(self, step, inference_iterations=0):
         progress = max(0.0, min(1.0, step + inference_iterations))
@@ -162,6 +163,18 @@ class CliRunner:
 
     def cached_model_source_holder(self, process_method, secondary_sources, model_name):
         self.cached_sources.setdefault(process_method, {})[model_name] = secondary_sources
+
+    def get_separator(self, model_data, process_data):
+        cache_key = (model_data.process_method, model_data.model_basename)
+        separator = self.separator_cache.get(cache_key)
+
+        if separator is None:
+            separator = build_separator(model_data, process_data)
+            self.separator_cache[cache_key] = separator
+            return separator
+
+        separator.update_process_data(process_data)
+        return separator
 
     def build_process_data(self, audio_file, export_path):
         audio_file_base = Path(audio_file).stem
@@ -331,7 +344,7 @@ def process_input(input_path, args, runner, model_data):
     process_data["model_data"] = model_data
     process_data["list_all_models"] = [model_data.model_basename]
     print(f"[input] {path}", file=sys.stderr)
-    separator = build_separator(model_data, process_data)
+    separator = runner.get_separator(model_data, process_data)
     separator.seperate()
 
     return result_output_paths(model_data, path, args.output_dir)

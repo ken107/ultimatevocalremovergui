@@ -274,6 +274,36 @@ class SeperateAttributes:
             self.aggressiveness = {'value': model_data.aggression_setting, 
                                    'split_bin': self.mp.param['band'][1]['crop_stop'], 
                                    'aggr_correction': self.mp.param.get('aggr_correction')}
+
+    def update_process_data(self, process_data: dict):
+        self.process_data = process_data
+        self.progress_value = 0
+        self.set_progress_bar = process_data['set_progress_bar']
+        self.write_to_console = process_data['write_to_console']
+        self.audio_file = process_data['audio_file']
+        self.audio_file_base = process_data['audio_file_base']
+        self.audio_file_base_voc_split = None
+        self.export_path = process_data['export_path']
+        self.cached_source_callback = process_data['cached_source_callback']
+        self.cached_model_source_holder = process_data['cached_model_source_holder']
+        self.is_4_stem_ensemble = process_data['is_4_stem_ensemble']
+        self.list_all_models = process_data['list_all_models']
+        self.process_iteration = process_data['process_iteration']
+        self.primary_source_map = {}
+        self.secondary_source_map = {}
+        self.primary_source = None
+        self.secondary_source = None
+        self.secondary_source_primary = None
+        self.secondary_source_secondary = None
+        self.master_vocal_path = None
+        self.stem_path_init = os.path.join(self.export_path, f'{self.audio_file_base}_({self.secondary_stem}).wav')
+
+        if self.process_method == MDX_ARCH_TYPE:
+            self.primary_model_name, self.primary_sources = self.cached_source_callback(MDX_ARCH_TYPE, model_name=self.model_basename)
+        elif self.process_method == DEMUCS_ARCH_TYPE:
+            self.primary_model_name, self.primary_sources = self.cached_source_callback(DEMUCS_ARCH_TYPE, model_name=self.model_basename)
+        elif self.process_method == VR_ARCH_TYPE:
+            self.primary_model_name, self.primary_sources = self.cached_source_callback(VR_ARCH_TYPE, model_name=self.model_basename)
             
     def check_label_secondary_stem_runs(self):
 
@@ -470,7 +500,6 @@ class SeperateAttributes:
         return source
 
 class SeperateMDX(SeperateAttributes):        
-
     def seperate(self):
         samplerate = 44100
     
@@ -480,18 +509,19 @@ class SeperateMDX(SeperateAttributes):
         else:
             self.start_inference_console_write()
 
-            if self.is_mdx_ckpt:
-                model_params = torch.load(self.model_path, map_location=lambda storage, loc: storage)['hyper_parameters']
-                self.dim_c, self.hop = model_params['dim_c'], model_params['hop_length']
-                separator = MdxnetSet.ConvTDFNet(**model_params)
-                self.model_run = separator.load_from_checkpoint(self.model_path).to(self.device).eval()
-            else:
-                if self.mdx_segment_size == self.dim_t and not self.is_other_gpu:
-                    ort_ = ort.InferenceSession(self.model_path, providers=self.run_type)
-                    self.model_run = lambda spek:ort_.run(None, {'input': spek.cpu().numpy()})[0]
+            if getattr(self, 'model_run', None) is None:
+                if self.is_mdx_ckpt:
+                    model_params = torch.load(self.model_path, map_location=lambda storage, loc: storage)['hyper_parameters']
+                    self.dim_c, self.hop = model_params['dim_c'], model_params['hop_length']
+                    separator = MdxnetSet.ConvTDFNet(**model_params)
+                    self.model_run = separator.load_from_checkpoint(self.model_path).to(self.device).eval()
                 else:
-                    self.model_run = ConvertModel(load(self.model_path))
-                    self.model_run.to(self.device).eval()
+                    if self.mdx_segment_size == self.dim_t and not self.is_other_gpu:
+                        ort_ = ort.InferenceSession(self.model_path, providers=self.run_type)
+                        self.model_run = lambda spek:ort_.run(None, {'input': spek.cpu().numpy()})[0]
+                    else:
+                        self.model_run = ConvertModel(load(self.model_path))
+                        self.model_run.to(self.device).eval()
 
             self.running_inference_console_write()
             mix = prepare_mix(self.audio_file)
@@ -637,7 +667,6 @@ class SeperateMDX(SeperateAttributes):
         return self.stft.inverse(torch.tensor(spec_pred).to(self.device)).cpu().detach().numpy()
 
 class SeperateMDXC(SeperateAttributes):        
-
     def seperate(self):
         samplerate = 44100
         sources = None
@@ -737,15 +766,17 @@ class SeperateMDXC(SeperateAttributes):
         if self.is_pitch_change:
             mix, sr_pitched = spec_utils.change_pitch_semitones(mix, 44100, semitone_shift=-self.semitone_shift)
 
-        model = TFC_TDF_net(self.mdx_c_configs, device=self.device)
-        model.load_state_dict(torch.load(self.model_path, map_location=cpu))
-        model.to(self.device).eval()
+        if getattr(self, 'model_run', None) is None:
+            self.model_run = TFC_TDF_net(self.mdx_c_configs, device=self.device)
+            self.model_run.load_state_dict(torch.load(self.model_path, map_location=cpu))
+            self.model_run.to(self.device).eval()
+
         mix = torch.tensor(mix, dtype=torch.float32)
 
         try:
-            S = model.num_target_instruments
+            S = self.model_run.num_target_instruments
         except Exception as e:
-            S = model.module.num_target_instruments
+            S = self.model_run.module.num_target_instruments
 
         mdx_segment_size = self.mdx_c_configs.inference.dim_t if self.is_mdx_c_seg_def else self.mdx_segment_size
         
@@ -768,7 +799,7 @@ class SeperateMDXC(SeperateAttributes):
             cnt = 0
             for batch in batches:
                 self.running_inference_progress_bar(len(batches))
-                x = model(batch.to(self.device))
+                x = self.model_run(batch.to(self.device))
                 
                 for w in x:
                     X[..., cnt * hop_size : cnt * hop_size + chunk_size] += w
@@ -817,25 +848,26 @@ class SeperateDemucs(SeperateAttributes):
         mix = prepare_mix(self.audio_file)
 
         if is_no_cache:
-            if self.demucs_version == DEMUCS_V1:
-                if str(self.model_path).endswith(".gz"):
-                    self.model_path = gzip.open(self.model_path, "rb")
-                klass, args, kwargs, state = torch.load(self.model_path)
-                self.demucs = klass(*args, **kwargs)
-                self.demucs.to(self.device) 
-                self.demucs.load_state_dict(state)
-            elif self.demucs_version == DEMUCS_V2:
-                self.demucs = auto_load_demucs_model_v2(self.demucs_source_list, self.model_path)
-                self.demucs.to(self.device) 
-                self.demucs.load_state_dict(torch.load(self.model_path))
-                self.demucs.eval()
-            else:  
-                self.demucs = HDemucs(sources=self.demucs_source_list)
-                self.demucs = _gm(name=os.path.splitext(os.path.basename(self.model_path))[0], 
-                                  repo=Path(os.path.dirname(self.model_path)))
-                self.demucs = demucs_segments(self.segment, self.demucs)
-                self.demucs.to(self.device)
-                self.demucs.eval()
+            if getattr(self, 'demucs', None) is None:
+                if self.demucs_version == DEMUCS_V1:
+                    if str(self.model_path).endswith(".gz"):
+                        self.model_path = gzip.open(self.model_path, "rb")
+                    klass, args, kwargs, state = torch.load(self.model_path)
+                    self.demucs = klass(*args, **kwargs)
+                    self.demucs.to(self.device)
+                    self.demucs.load_state_dict(state)
+                elif self.demucs_version == DEMUCS_V2:
+                    self.demucs = auto_load_demucs_model_v2(self.demucs_source_list, self.model_path)
+                    self.demucs.to(self.device)
+                    self.demucs.load_state_dict(torch.load(self.model_path))
+                    self.demucs.eval()
+                else:
+                    self.demucs = HDemucs(sources=self.demucs_source_list)
+                    self.demucs = _gm(name=os.path.splitext(os.path.basename(self.model_path))[0],
+                                      repo=Path(os.path.dirname(self.model_path)))
+                    self.demucs = demucs_segments(self.segment, self.demucs)
+                    self.demucs.to(self.device)
+                    self.demucs.eval()
 
             if self.pre_proc_model:
                 if self.primary_stem not in [VOCAL_STEM, INST_STEM]:
@@ -856,8 +888,6 @@ class SeperateDemucs(SeperateAttributes):
                 source = self.demix_demucs(mix)
             
             self.write_to_console(DONE, base_text='')
-            
-            del self.demucs
             clear_gpu_cache()
             
         if isinstance(inst_source, np.ndarray):
@@ -1021,7 +1051,6 @@ class SeperateDemucs(SeperateAttributes):
         return sources
 
 class SeperateVR(SeperateAttributes):        
-
     def seperate(self):
         if self.primary_model_name == self.model_basename and isinstance(self.primary_sources, tuple):
             y_spec, v_spec = self.primary_sources
@@ -1031,24 +1060,25 @@ class SeperateVR(SeperateAttributes):
 
             device = self.device
 
-            nn_arch_sizes = [
-                31191, # default
-                33966, 56817, 123821, 123812, 129605, 218409, 537238, 537227]
-            vr_5_1_models = [56817, 218409]
-            model_size = math.ceil(os.stat(self.model_path).st_size / 1024)
-            nn_arch_size = min(nn_arch_sizes, key=lambda x:abs(x-model_size))
+            if getattr(self, 'model_run', None) is None:
+                nn_arch_sizes = [
+                    31191, # default
+                    33966, 56817, 123821, 123812, 129605, 218409, 537238, 537227]
+                vr_5_1_models = [56817, 218409]
+                model_size = math.ceil(os.stat(self.model_path).st_size / 1024)
+                nn_arch_size = min(nn_arch_sizes, key=lambda x:abs(x-model_size))
 
-            if nn_arch_size in vr_5_1_models or self.is_vr_51_model:
-                self.model_run = nets_new.CascadedNet(self.mp.param['bins'] * 2, 
-                                                      nn_arch_size, 
-                                                      nout=self.model_capacity[0], 
-                                                      nout_lstm=self.model_capacity[1])
-                self.is_vr_51_model = True
-            else:
-                self.model_run = nets.determine_model_capacity(self.mp.param['bins'] * 2, nn_arch_size)
-                            
-            self.model_run.load_state_dict(torch.load(self.model_path, map_location=cpu)) 
-            self.model_run.to(device) 
+                if nn_arch_size in vr_5_1_models or self.is_vr_51_model:
+                    self.model_run = nets_new.CascadedNet(self.mp.param['bins'] * 2, 
+                                                          nn_arch_size, 
+                                                          nout=self.model_capacity[0], 
+                                                          nout_lstm=self.model_capacity[1])
+                    self.is_vr_51_model = True
+                else:
+                    self.model_run = nets.determine_model_capacity(self.mp.param['bins'] * 2, nn_arch_size)
+                                
+                self.model_run.load_state_dict(torch.load(self.model_path, map_location=cpu)) 
+                self.model_run.to(device) 
 
             self.running_inference_console_write()
                         
