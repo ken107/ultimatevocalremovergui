@@ -25,7 +25,11 @@ PyYAML==6.0
 resampy==0.4.2
 scipy==1.9.3
 soundstretch==1.2
-torch
+# NVIDIA CUDA build for RTX 3090. This lets pip/uv resolve the CUDA wheels
+# instead of the CPU-only PyPI wheels.
+--extra-index-url https://download.pytorch.org/whl/cu128
+torch==2.11.0+cu128
+torchvision==0.26.0+cu128
 urllib3==1.26.12
 wget==3.2
 samplerate==0.1.0
@@ -33,7 +37,8 @@ screeninfo==0.8.1
 diffq
 playsound==1.2.2
 onnx
-onnxruntime
+# Do not install the CPU onnxruntime package alongside onnxruntime-gpu.
+# Both provide the same Python import, and CPU onnxruntime can shadow CUDA providers.
 onnxruntime-gpu
 onnx2pytorch
 SoundFile==0.11.0; sys_platform != 'darwin'
