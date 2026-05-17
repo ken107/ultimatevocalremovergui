@@ -31,7 +31,7 @@ wget==3.2
 samplerate==0.1.0
 screeninfo==0.8.1
 diffq
-playsound
+playsound==1.2.2
 onnx
 onnxruntime
 onnxruntime-gpu
